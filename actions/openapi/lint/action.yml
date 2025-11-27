@@ -1,0 +1,113 @@
+name: "Lint OpenAPI specs"
+description: "Lints OpenAPI specs using Spectral and the spectral:oas ruleset."
+
+inputs:
+  specs_json:
+    description: "JSON array of OpenAPI spec paths to lint"
+    required: true
+
+outputs:
+  lint_has_errors:
+    description: "Whether linting found errors"
+    value: ${{ steps.lint.outputs.has_errors }}
+  lint_report_b64:
+    description: "Base64-encoded lint report in Markdown"
+    value: ${{ steps.lint.outputs.report_b64 }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: "22"
+
+    - name: Install jq
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+
+    - name: Install Spectral CLI
+      shell: bash
+      run: |
+        npm install -g @stoplight/spectral-cli
+
+    - name: Create Spectral ruleset extending spectral:oas
+      shell: bash
+      run: |
+        cat > .spectral.yaml << 'EOF'
+        extends: "spectral:oas"
+        EOF
+        echo "Created .spectral.yaml:"
+        cat .spectral.yaml
+
+    - name: Lint OpenAPI specs with Spectral
+      id: lint
+      shell: bash
+      env:
+        SPECS_JSON: ${{ inputs.specs_json }}
+      run: |
+        set -e
+
+        echo "Specs JSON: ${SPECS_JSON}"
+
+        REPORT_FILE="openapi-lint-report.md"
+        : > "${REPORT_FILE}"
+
+        HAS_ERRORS=0
+
+        while read -r spec; do
+          echo "Linting ${spec} with Spectral..."
+
+          # Use the local ruleset that extends the built-in spectral:oas
+          RESULTS_JSON=$(spectral lint "${spec}" -f json -r .spectral.yaml || true)
+
+          if [ -z "${RESULTS_JSON}" ] || ! echo "${RESULTS_JSON}" | jq empty >/dev/null 2>&1; then
+            echo "No lint results for ${spec}."
+            continue
+          fi
+
+          ERRORS_JSON=$(echo "${RESULTS_JSON}" | jq '[.[] | select(.severity == 0)]')
+          WARNINGS_JSON=$(echo "${RESULTS_JSON}" | jq '[.[] | select(.severity == 1)]')
+
+          ERRORS_COUNT=$(echo "${ERRORS_JSON}" | jq 'length')
+          WARNINGS_COUNT=$(echo "${WARNINGS_JSON}" | jq 'length')
+
+          echo "### \`${spec}\`" >> "${REPORT_FILE}"
+          echo "" >> "${REPORT_FILE}"
+
+          if [ "${ERRORS_COUNT}" -gt 0 ]; then
+            HAS_ERRORS=1
+            echo "#### ❌ ${ERRORS_COUNT} lint error(s)" >> "${REPORT_FILE}"
+            echo "" >> "${REPORT_FILE}"
+            echo "${ERRORS_JSON}" | jq -r '.[] | "- \(.message) (code: \(.code)) at `\(.path | join("."))`"' >> "${REPORT_FILE}"
+            echo "" >> "${REPORT_FILE}"
+          fi
+
+          if [ "${WARNINGS_COUNT}" -gt 0 ]; then
+            echo "#### ⚠️ ${WARNINGS_COUNT} lint warning(s)" >> "${REPORT_FILE}"
+            echo "" >> "${REPORT_FILE}"
+            echo "${WARNINGS_JSON}" | jq -r '.[] | "- \(.message) (code: \(.code)) at `\(.path | join("."))`"' >> "${REPORT_FILE}"
+            echo "" >> "${REPORT_FILE}"
+          fi
+
+          if [ "${ERRORS_COUNT}" -eq 0 ] && [ "${WARNINGS_COUNT}" -eq 0 ]; then
+            echo "- ✅ No lint issues found." >> "${REPORT_FILE}"
+            echo "" >> "${REPORT_FILE}"
+          fi
+        done <<< "$(echo "${SPECS_JSON}" | jq -r '.[]')"
+
+        echo "Lint report:"
+        cat "${REPORT_FILE}"
+
+        REPORT_B64=$(base64 -w0 "${REPORT_FILE}")
+        if [ "${HAS_ERRORS}" -ne 0 ]; then
+          echo "has_errors=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_errors=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "report_b64=${REPORT_B64}" >> "$GITHUB_OUTPUT"

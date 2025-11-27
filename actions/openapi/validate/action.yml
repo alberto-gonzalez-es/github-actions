@@ -1,0 +1,98 @@
+name: "Validate OpenAPI specs"
+description: "Validates OpenAPI specs using openapi-generator-cli."
+
+inputs:
+  specs_json:
+    description: "JSON array of OpenAPI spec paths to validate"
+    required: true
+
+outputs:
+  validation_has_errors:
+    description: "Whether validation found errors"
+    value: ${{ steps.validate.outputs.has_errors }}
+  validation_report_b64:
+    description: "Base64-encoded validation report in Markdown"
+    value: ${{ steps.validate.outputs.report_b64 }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Setup Java
+      uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: "25"
+
+    - name: Install jq
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+
+    - name: Download openapi-generator-cli
+      shell: bash
+      run: |
+        curl -L \
+          https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.17.0/openapi-generator-cli-7.17.0.jar \
+          -o openapi-generator-cli.jar
+
+    - name: Validate OpenAPI specs
+      id: validate
+      shell: bash
+      env:
+        SPECS_JSON: ${{ inputs.specs_json }}
+      run: |
+        set -e
+
+        REPORT_FILE="openapi-validation-report.md"
+        : > "${REPORT_FILE}"
+
+        HAS_ERRORS=0
+
+        while read -r spec; do
+          echo "Validating ${spec}..."
+          OUTPUT_FILE="$(mktemp)"
+          EXIT_CODE=0
+
+          if ! java -jar openapi-generator-cli.jar validate -i "${spec}" > "${OUTPUT_FILE}" 2>&1; then
+            EXIT_CODE=$?
+          fi
+
+          # Force success if the validator explicitly states there's no issues
+          if grep -q "No validation issues detected" "${OUTPUT_FILE}"; then
+            EXIT_CODE=0
+          fi
+
+          echo "### \`${spec}\`" >> "${REPORT_FILE}"
+          echo "" >> "${REPORT_FILE}"
+
+          if [ "${EXIT_CODE}" -ne 0 ]; then
+            HAS_ERRORS=1
+            echo "#### ❌ Validation errors" >> "${REPORT_FILE}"
+            echo "" >> "${REPORT_FILE}"
+            echo '```text' >> "${REPORT_FILE}"
+            cat "${OUTPUT_FILE}" >> "${REPORT_FILE}"
+            echo '```' >> "${REPORT_FILE}"
+            echo "" >> "${REPORT_FILE}"
+          else
+            echo "- ✅ No validation issues detected." >> "${REPORT_FILE}"
+            echo "" >> "${REPORT_FILE}"
+          fi
+
+          rm -f "${OUTPUT_FILE}"
+        done <<< "$(echo "${SPECS_JSON}" | jq -r '.[]')"
+
+        if [ "${HAS_ERRORS}" -eq 0 ]; then
+          echo "All OpenAPI specs are valid." >> "${REPORT_FILE}"
+        fi
+
+        REPORT_B64=$(base64 -w0 "${REPORT_FILE}")
+        echo "report_b64=${REPORT_B64}" >> "$GITHUB_OUTPUT"
+        if [ "${HAS_ERRORS}" -ne 0 ]; then
+          echo "has_errors=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_errors=false" >> "$GITHUB_OUTPUT"
+        fi
