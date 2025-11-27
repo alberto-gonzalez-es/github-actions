@@ -1,0 +1,85 @@
+name: "Detect changed files"
+description: "Detects changed files between two SHAs and outputs them as JSON. Optionally filters by path prefix."
+
+inputs:
+  base_sha:
+    description: "Base SHA to diff from (defaults to pull_request.base.sha)"
+    required: false
+    default: ""
+  head_sha:
+    description: "Head SHA to diff to (defaults to pull_request.head.sha)"
+    required: false
+    default: ""
+  path_prefix:
+    description: "Optional path prefix to filter changed files (e.g. 'api/rest/'). If empty, all files are returned."
+    required: false
+    default: ""
+
+outputs:
+  files_json:
+    description: "JSON array with the paths of changed files (after optional filtering)"
+    value: ${{ steps.detect.outputs.files_json }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Install jq
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+
+    - name: Detect changed files
+      id: detect
+      shell: bash
+      env:
+        INPUT_BASE_SHA: ${{ inputs.base_sha }}
+        INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+        INPUT_PATH_PREFIX: ${{ inputs.path_prefix }}
+        DEFAULT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        DEFAULT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -e
+
+        # Fallback to PR base/head if inputs are empty
+        BASE_SHA="${INPUT_BASE_SHA:-$DEFAULT_BASE_SHA}"
+        HEAD_SHA="${INPUT_HEAD_SHA:-$DEFAULT_HEAD_SHA}"
+        PATH_PREFIX="${INPUT_PATH_PREFIX}"
+
+        echo "Base SHA: ${BASE_SHA}"
+        echo "Head SHA: ${HEAD_SHA}"
+        echo "Path prefix filter: '${PATH_PREFIX}'"
+
+        CHANGED_FILES=$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" || true)
+
+        echo "Changed files:"
+        echo "${CHANGED_FILES}"
+
+        if [ -z "${CHANGED_FILES}" ]; then
+          echo "No changed files."
+          printf 'files_json=%s\n' "[]" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ -n "${PATH_PREFIX}" ]; then
+          FILTERED=$(echo "${CHANGED_FILES}" | grep -E "^${PATH_PREFIX}" || true)
+        else:
+          FILTERED="${CHANGED_FILES}"
+        fi
+
+        if [ -z "${FILTERED}" ]; then
+          echo "No changed files after applying path_prefix filter."
+          printf 'files_json=%s\n' "[]" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Filtered changed files:"
+        echo "${FILTERED}"
+
+        FILES_JSON_COMPACT=$(printf '%s\n' "${FILTERED}" | jq -R . | jq -s -c .)
+        printf 'files_json=%s\n' "${FILES_JSON_COMPACT}" >> "$GITHUB_OUTPUT"
