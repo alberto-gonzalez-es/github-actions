@@ -69,9 +69,10 @@ runs:
           exit 0
         fi
 
+        # Apply optional path prefix filter
         if [ -n "${PATH_PREFIX}" ]; then
           FILTERED=$(echo "${CHANGED_FILES}" | grep -E "^${PATH_PREFIX}" || true)
-        else:
+        else
           FILTERED="${CHANGED_FILES}"
         fi
 
